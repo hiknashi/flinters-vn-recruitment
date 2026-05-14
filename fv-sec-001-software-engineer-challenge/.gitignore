@@ -1,2 +1,6 @@
 generator
 ad_data.csv
+
+# Built binary and test artifacts
+/aggregator
+*.test

@@ -1,163 +1,179 @@
-# FV-SEC001 - Software Engineer Challenge — Ad Performance Aggregator
+# Ad Performance Aggregator
 
-## Introduction
-This is a data processing challenge for Developer candidates applying to our company.  
-You will work with a large CSV dataset (~1GB) containing advertising performance records.
+A console application that processes a large advertising-performance CSV
+(~1 GB, ~27 M rows) and produces aggregated analytics: per-campaign totals and
+the top-N campaigns ranked by CTR and by CPA.
 
-The goal is to evaluate your ability to write clean code, handle large datasets efficiently, optimize performance/memory usage, and design a robust data-processing workflow.
+> The original challenge brief (FV-SEC001) is preserved in the git history of
+> this repository.
 
----
+## Requirements
 
-## Input Data
+- Go **1.24** or newer
+- No third-party dependencies — standard library only
 
-### Download the Dataset
-
-1. Download the `ad_data.csv.zip` file from this repository folder
-2. Unzip it to get the `ad_data.csv` file (~1GB)
-3. Use this CSV file for your solution
+## Setup
 
 ```bash
-# Example: Unzip the file
+# 1. Unzip the dataset (kept out of git via .gitignore)
 unzip ad_data.csv.zip
+
+# 2. Build
+go build -o aggregator ./cmd/aggregator
+#   or: make build
 ```
 
-### CSV Schema
+## Usage
 
-| Column         | Type      | Description |
-|----------------|-----------|-------------|
-| campaign_id    | string    | Campaign ID |
-| date           | string    | Date in `YYYY-MM-DD` format |
-| impressions    | integer   | Number of impressions |
-| clicks         | integer   | Number of clicks |
-| spend          | float     | Advertising cost (USD) |
-| conversions    | integer   | Number of conversions |
+```bash
+./aggregator [--input ./ad_data.csv] [--output ./results] [--top 10]
+```
 
-### Example:
+| Flag       | Default          | Description                                            |
+|------------|------------------|--------------------------------------------------------|
+| `--input`  | `./ad_data.csv`  | Path to the input CSV file                             |
+| `--output` | `./results`      | Directory for the result files (created if missing)    |
+| `--top`    | `10`             | Number of campaigns written to each result file (≥ 1)  |
 
-| campaign_id | date       | impressions | clicks | spend | conversions |
-|-------------|------------|-------------|--------|-------|-------------|
-| CMP001      | 2025-01-01 | 12000       | 300    | 45.50 | 12          |
-| CMP002      | 2025-01-01 | 8000        | 120    | 28.00 | 4           |
-| CMP001      | 2025-01-02 | 14000       | 340    | 48.20 | 15          |
-| CMP003      | 2025-01-01 | 5000        | 60     | 15.00 | 3           |
-| CMP002      | 2025-01-02 | 8500        | 150    | 31.00 | 5           |
+Example:
 
----
+```bash
+./aggregator --input ./ad_data.csv --output ./results --top 10
+```
 
-# 🎯 Task Requirements
+The program prints a short run summary (rows parsed/skipped, worker count,
+elapsed time, memory) to stderr.
 
-You must build a **console application (CLI)** in any programming language (Python, NodeJS, Go, Java, Rust, etc.) that processes the CSV file and produces aggregated analytics.
+## Output
 
----
+Two CSV files are written to the output directory, named after `--top`:
 
-## 1. Aggregate data by `campaign_id`
+- `top<N>_ctr.csv` — the N campaigns with the **highest CTR**
+- `top<N>_cpa.csv` — the N campaigns with the **lowest CPA** (campaigns with
+  zero conversions are excluded)
 
-For each `campaign_id`, compute:
+With the default `--top 10` these are exactly `top10_ctr.csv` and
+`top10_cpa.csv`. Both files share the column layout:
 
-- `total_impressions`
-- `total_clicks`
-- `total_spend`
-- `total_conversions`
-- `CTR` = total_clicks / total_impressions  
-- `CPA` = total_spend / total_conversions  
-  - If conversions = 0, ignore or return `null` for CPA
+```
+campaign_id,total_impressions,total_clicks,total_spend,total_conversions,CTR,CPA
+```
 
----
+Sample output (`results/top10_ctr.csv`) is included in this repository.
 
-## 2. Generate two result lists
+## Per-campaign metrics
 
-### **A. Top 10 campaigns with the highest CTR**
+For each `campaign_id` the program computes `total_impressions`,
+`total_clicks`, `total_spend`, `total_conversions`, and:
 
-Output as CSV format.
+- **CTR** = `total_clicks / total_impressions` (0 when there are no impressions)
+- **CPA** = `total_spend / total_conversions` (null — written as an empty
+  field — when there are no conversions)
 
-**Expected output format (`top10_ctr.csv`):**
+## How it works
 
-| campaign_id | total_impressions | total_clicks | total_spend | total_conversions | CTR    | CPA   |
-|-------------|-------------------|--------------|-------------|-------------------|--------|-------|
-| CMP042      | 125000            | 6250         | 12500.50    | 625               | 0.0500 | 20.00 |
-| CMP015      | 340000            | 15300        | 30600.25    | 1530              | 0.0450 | 20.00 |
-| CMP008      | 890000            | 35600        | 71200.75    | 3560              | 0.0400 | 20.00 |
-| CMP023      | 445000            | 15575        | 31150.00    | 1557              | 0.0350 | 20.00 |
-| CMP031      | 670000            | 20100        | 40200.50    | 2010              | 0.0300 | 20.00 |
+The design keeps memory bounded by the number of *distinct campaigns*, never
+by the size of the input, while using all CPU cores for parsing.
 
-### **B. Top 10 campaigns with the lowest CPA**
+1. **Parallel chunked reading.** The input file is split into one contiguous
+   byte range per CPU core. Each worker seeks to its range and realigns to the
+   next line boundary, so a row split across a boundary is processed by exactly
+   one worker — no row is dropped or double-counted. Workers stream their range
+   through a 1 MiB buffer; the file is never loaded into memory.
 
-Output as CSV format. Exclude campaigns with zero conversions.
+2. **Fast row parsing.** Rows are parsed directly from the read buffer by
+   scanning for commas — no `encoding/csv` overhead. The `campaign_id` is
+   returned as a slice that aliases the buffer, so no string is allocated per
+   row. Malformed rows (wrong field count, non-numeric/negative values, empty
+   campaign id) are skipped and counted rather than aborting the run.
 
-**Expected output format (`top10_cpa.csv`):**
+3. **Partitioned aggregation.** Totals live in a `ShardedAggregator` whose
+   keyspace is partitioned across many independently locked shards. Each
+   `campaign_id` belongs to exactly one shard, so total memory is
+   `O(distinct campaigns)` regardless of the worker count — there is no
+   per-worker copy of the full keyspace.
 
-| campaign_id | total_impressions | total_clicks | total_spend | total_conversions | CTR    | CPA   |
-|-------------|-------------------|--------------|-------------|-------------------|--------|-------|
-| CMP007      | 450000            | 13500        | 13500.00    | 1350              | 0.0300 | 10.00 |
-| CMP019      | 780000            | 23400        | 23400.00    | 2340              | 0.0300 | 10.00 |
-| CMP033      | 290000            | 8700         | 10440.00    | 870               | 0.0300 | 12.00 |
-| CMP012      | 560000            | 16800        | 21840.00    | 1680              | 0.0300 | 13.00 |
-| CMP025      | 320000            | 9600         | 13440.00    | 960               | 0.0300 | 14.00 |
+4. **Per-worker combiner.** Each worker first folds rows into a small local map
+   and flushes it into the shared shards periodically (and once at the end).
+   This cuts lock traffic to roughly one acquisition per *key per flush*
+   instead of one per row, and bounds each worker's local memory.
 
----
+5. **Bounded-heap ranking.** The top-N lists are built with a size-N min-heap
+   in `O(distinct campaigns · log N)` time and `O(N)` space — the ranking step
+   never materialises a full sort of the keyspace.
 
-## 3. Technical Requirements
+### Scaling note
 
-- The file is large (~1GB).  
-   **Your solution must handle large datasets efficiently with good performance and memory optimization.**
-- The program should be runnable via CLI, for example: `python aggregator.py --input ad_data.csv --output results/`
+This solution is built for input with a *large and diverse* set of
+`campaign_id` values, not just the sample dataset. Steps 3–5 ensure memory and
+ranking scale with cardinality, not file size, so millions of distinct
+campaigns are handled comfortably in flat, low memory. If cardinality ever
+exceeded available RAM, the natural next step would be a spill-to-disk pass
+(hash-partition rows to temp files, aggregate each partition independently);
+the partitioned architecture above is already the right shape for that.
 
----
+## Design decisions
 
-# 📬 Submission Instructions
+- **Tie-breaking.** The brief does not specify it. Ties in CTR/CPA are broken
+  by `campaign_id` ascending, so output is fully deterministic.
+- **CTR with zero impressions** is `0` — a campaign that was never shown cannot
+  be ranked by click rate.
+- **CPA with zero conversions** is undefined: such campaigns are excluded from
+  the CPA list and show an empty CPA field in the CTR file.
+- **Malformed rows are skipped, not fatal**, and reported in the run summary.
+  Missing/unreadable input files are fatal with a clear message.
+- **`spend` is accumulated as `float64`.** Sums of decimal values carry the
+  usual floating-point imprecision; this matched the reference output to the
+  cent on the sample dataset. Accumulating integer cents would be the
+  alternative if exact decimal arithmetic were required.
+- **Output precision:** CTR to 4 decimal places, CPA and spend to 2 — matching
+  the formats in the challenge brief.
+- **Worker count** defaults to `runtime.NumCPU()`.
 
-Please submit your **GitHub repository link** via email to: **backoffice@flinters.vn**
+## Performance
 
-Your repository should include:
+Measured on the provided 1 GB dataset (`ad_data.csv`, 26,843,544 data rows),
+16 CPU cores, Go 1.24.2 — see [`benchmark.log`](./benchmark.log).
 
-1. **Source code** in a GitHub repository  
-2. Output result files:
-   - `top10_ctr.csv`
-   - `top10_cpa.csv`
-3. A **README.md** including:
-   - Setup instructions  
-   - How to run the program  
-   - Libraries used  
-   - Processing time for the 1GB file  
-   - Peak memory usage (if measured)
-4. *(Optional but recommended)*  
-   - Dockerfile  
-   - Benchmark logs  
-5. **(If used) `PROMPTS.md`** — see [AI Coding Assistants](#-ai-coding-assistants) section below
+| Metric                 | Result                          |
+|------------------------|---------------------------------|
+| Processing time (1 GB) | **~0.49 s** (5-run avg ~0.49 s) |
+| Peak resident memory   | **~20 MiB** (`VmHWM`)           |
+| Rows parsed / skipped  | 26,843,544 / 0                  |
 
----
+Throughput is roughly **2 GB/s** / ~55 M rows/s. Memory stays flat because the
+file is streamed and only ~50 distinct campaigns are retained; on
+high-cardinality input memory grows only with the campaign count.
 
-## ✅ Code Quality Expectations
+## Testing
 
-Please write your code carefully. We expect:
+```bash
+go test ./...
+#   or: make test
+```
 
-- **Correct results** — output must match expected values precisely
-- **Clean, readable code** — meaningful names, consistent style, no dead code or commented-out blocks
-- **Error handling** — handle missing files, malformed rows, and edge cases gracefully
-- **Performance awareness** — the input is ~1GB; your solution must be memory-efficient
-- **Tests** — include tests to verify your solution's correctness
-- **Documented decisions** — briefly explain non-obvious choices in your README
+Tests cover row parsing and edge cases, chunk-boundary correctness (every row
+counted exactly once across many split counts), aggregation and concurrent
+shard access, the combiner's periodic-flush path, ranking with tie-breaks and
+zero-conversion exclusion, and CSV output formatting (including null CPA).
 
+Correctness on the real dataset was additionally cross-checked against an
+independent `awk` aggregation.
 
----
+## Docker
 
-## 🤖 AI Coding Assistants
+```bash
+docker build -t adperf .
+docker run --rm -v "$PWD:/data" -w /data adperf \
+  --input /data/ad_data.csv --output /data/results --top 10
+```
 
-**We encourage you to use AI coding assistants** such as GitHub Copilot, Claude (Cursor AI, Cline), ChatGPT, or any other AI tools you prefer!
+## Project layout
 
-### **If you use AI coding assistants:**
-Please include a **`PROMPTS.md`** file in the root of your repository. This helps us understand:
-- How you break down problems
-- Your communication with AI tools
-- Your problem-solving approach
-
-**Requirements for `PROMPTS.md`:**
-- Must be a file named exactly `PROMPTS.md` (no other format accepted)
-- Paste your prompts **as-is** — raw, unedited, exactly as you typed them
-- Do **not** clean up, polish, or rewrite your prompts before submitting
-
-This is **not mandatory** but **highly valued** as it demonstrates your ability to effectively leverage modern development tools.
-
----
-
-Good luck, and happy coding!
+```
+cmd/aggregator/      CLI entry point and orchestration
+internal/parse/      file splitting, chunk reading, row parsing
+internal/aggregate/  sharded aggregator, per-worker combiner, top-N ranking
+internal/output/     CSV result writers
+benchmark.log        timing and memory measurements
+```

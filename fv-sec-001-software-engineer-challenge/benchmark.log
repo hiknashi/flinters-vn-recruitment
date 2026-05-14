@@ -1,0 +1,17 @@
+# Benchmark log
+
+Host: 16 CPU cores, Linux 6.12.57+deb13-amd64 x86_64
+Go:   go1.24.2
+Input: ad_data.csv — 1043304870 bytes (~1 GB), 26,843,544 data rows
+
+## Five consecutive runs (default flags: --top 10, 16 workers)
+
+rows parsed:    26843544 rows skipped:   0 elapsed:        503ms 
+rows parsed:    26843544 rows skipped:   0 elapsed:        490ms 
+rows parsed:    26843544 rows skipped:   0 elapsed:        479ms 
+rows parsed:    26843544 rows skipped:   0 elapsed:        499ms 
+rows parsed:    26843544 rows skipped:   0 elapsed:        488ms 
+
+## Peak resident memory (VmHWM, sampled every 50ms)
+
+Peak RSS: 20508 kB (~20 MiB)
